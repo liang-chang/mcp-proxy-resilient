@@ -130,6 +130,7 @@ celerybeat.pid
 # Environments
 .env
 .venv
+.venv-*/
 env/
 venv/
 ENV/
@@ -169,3 +170,13 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Local deployment and agent workspace state; publish examples instead.
+/.worktrees/
+/.codegraph/
+/.superpowers/
+/docs/superpowers/
+/servers.json
+/mcp-proxy-resilient_start_up.cmd
+/tool-cache*/
+/logs/

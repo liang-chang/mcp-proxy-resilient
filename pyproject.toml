@@ -1,7 +1,8 @@
 [project]
-name = "mcp-proxy"
-description = "A MCP server which proxies requests to a remote MCP server over streamable HTTP or SSE."
+name = "mcp-proxy-resilient"
+description = "A recoverable MCP proxy connecting stdio and HTTP servers with shared discovery and reconnection."
 authors = [{ name = "Sergey Parfenyuk", email = "sergey.parfenyuk@gmail.com" }]
+maintainers = [{ name = "liang-chang" }]
 license = "MIT"
 license-files = ["LICENSE"]
 readme = "README.md"
@@ -12,6 +13,7 @@ classifiers = [
     "Intended Audience :: Information Technology",
     "Intended Audience :: System Administrators",
     "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Operating System :: Unix",
     "Programming Language :: Python",
@@ -26,7 +28,7 @@ classifiers = [
     "Topic :: Utilities",
     "Typing :: Typed",
 ]
-version = "0.13.0"
+dynamic = ["version"]
 requires-python = ">=3.10"
 dependencies = ["httpx-auth>=0.23.1", "mcp>=1.27.1,<2", "uvicorn>=0.47.0"]
 
@@ -35,20 +37,27 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project.urls]
-Homepage = "https://github.com/sparfenyuk/mcp-proxy"
-Source = "https://github.com/sparfenyuk/mcp-proxy"
-Documentation = "https://github.com/sparfenyuk/mcp-proxy"
-Changelog = "https://github.com/sparfenyuk/mcp-proxy/releases"
+Homepage = "https://github.com/liang-chang/mcp-proxy-resilient"
+Source = "https://github.com/liang-chang/mcp-proxy-resilient"
+Documentation = "https://github.com/liang-chang/mcp-proxy-resilient#readme"
+Changelog = "https://github.com/liang-chang/mcp-proxy-resilient/blob/main/CHANGELOG.md"
+Issues = "https://github.com/liang-chang/mcp-proxy-resilient/issues"
 
 [project.scripts]
-mcp-proxy = "mcp_proxy.__main__:main"
-mcp-reverse-proxy = "mcp_proxy.__main__:client"
+mcp-proxy-resilient = "mcp_proxy.__main__:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "mcp_proxy.__version__"}
 
 [tool.setuptools.package-data]
 "*" = ["py.typed"]
 
 [dependency-groups]
+build = [
+    "pyinstaller==6.22.3",
+]
 dev = [
+    "ruff==0.15.13",
     "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
     "coverage>=7.14.0",

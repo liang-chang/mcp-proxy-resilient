@@ -1,0 +1,103 @@
+name: GitHub Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: "1"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yaml
+
+  build:
+    needs: ci
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          python-version: "3.13"
+      - run: uv sync --locked
+      - name: Resolve version and check release tag
+        id: version
+        shell: pwsh
+        run: |
+          $version = uv run --locked python -c 'from mcp_proxy import __version__; print(__version__)'
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve package version' }
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -cne "v$version") {
+            throw "Tag must be v$version"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+      - name: Build Windows portable distribution
+        shell: pwsh
+        run: ./scripts/build-windows.ps1
+      - name: Verify relocated executable and all transport combinations
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $archiveVersion = $env:RELEASE_VERSION.Replace('+resilient.', '-r')
+          $archive = "dist/mcp-proxy-resilient-$archiveVersion-windows-x64.zip"
+          $verifyDirectory = Join-Path $env:RUNNER_TEMP 'mcp proxy portable verification'
+          Expand-Archive -LiteralPath $archive -DestinationPath $verifyDirectory
+          $env:MCP_PROXY_PORTABLE_EXE = Join-Path $verifyDirectory 'mcp-proxy-resilient/mcp-proxy-resilient.exe'
+          uv run --locked pytest -q
+          if ($LASTEXITCODE -ne 0) { throw 'Portable distribution tests failed' }
+      - name: Build Python wheel and source distribution
+        run: uv build --out-dir dist/python
+      - name: Stage release assets and checksums
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $archiveVersion = $env:RELEASE_VERSION.Replace('+resilient.', '-r')
+          $archive = "dist/mcp-proxy-resilient-$archiveVersion-windows-x64.zip"
+          # uv also creates .gitignore in the output directory; it is not a release asset.
+          $pythonAssets = @(Get-ChildItem -LiteralPath dist/python -File | Where-Object {
+            $_.Name -like '*.whl' -or $_.Name -like '*.tar.gz'
+          })
+          if ($pythonAssets.Count -ne 2) { throw 'Expected one wheel and one sdist' }
+          $releaseDirectory = New-Item -ItemType Directory -Path dist/release
+          Copy-Item -LiteralPath $pythonAssets.FullName -Destination $releaseDirectory
+          Copy-Item -LiteralPath $archive,"$archive.sha256" -Destination $releaseDirectory
+          Get-ChildItem -LiteralPath $releaseDirectory -File | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          } | Set-Content -LiteralPath (Join-Path $releaseDirectory 'SHA256SUMS.txt') -Encoding ascii
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-assets
+          path: dist/release/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-assets
+          path: release-assets
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" release-assets/*
+          --verify-tag --generate-notes
+          --title "mcp-proxy-resilient $GITHUB_REF_NAME"

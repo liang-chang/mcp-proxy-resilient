@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "local": {
+      "enabled": true,
+      "command": "your-mcp-server",
+      "args": [],
+      "env": {}
+    },
+    "remote": {
+      "enabled": false,
+      "url": "http://127.0.0.1:19090/mcp",
+      "transport": "streamablehttp",
+      "headers": {},
+      "verify_ssl": true
+    }
+  }
+}

@@ -2,7 +2,7 @@
 
 Two ways to run the application:
 1. Run the application as a module `uv run -m mcp_proxy`
-2. Run the application as a package `uv run mcp-proxy`
+2. Run the application as a package `uv run mcp-proxy-resilient`
 
 """
 
@@ -10,18 +10,23 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import os
 import shlex
 import sys
 import typing as t
-from importlib.metadata import version
+from pathlib import Path
 
 from httpx import Auth, BasicAuth, DigestAuth
 from httpx_auth import OAuth2ClientCredentials
 from mcp.client.stdio import StdioServerParameters
 
-from .config_loader import load_named_server_configs_from_file
+from . import APP_NAME, __version__
+from .backend import BackendParameters, HttpServerParameters
+from .config_loader import load_named_server_configs_from_file, load_resilient_server_configs
 from .mcp_server import DEFAULT_EXPOSE_HEADERS, MCPServerSettings, run_mcp_server
+from .resilient import ResilienceSettings
+from .resilient_transports import cache_identity_for, connector_for, run_resilient_stdio
 from .sse_client import run_sse_client
 from .streamablehttp_client import run_streamablehttp_client
 
@@ -46,22 +51,72 @@ def _normalize_verify_ssl(value: str | bool | None) -> bool | str | None:
     return value
 
 
+def _positive_seconds(value: str) -> float:
+    seconds = float(value)
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError("must be a positive finite number")
+    return seconds
+
+
+class _PortAction(argparse.Action):
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,  # noqa: ARG002 - argparse callback signature.
+        namespace: argparse.Namespace,
+        values: object,
+        option_string: str | None = None,  # noqa: ARG002
+    ) -> None:
+        setattr(namespace, self.dest, values)
+        namespace.explicit_port = True
+
+
+def _resolve_frontend(args: argparse.Namespace) -> t.Literal["stdio", "http"]:
+    """Retain legacy inference unless the user explicitly chooses a frontend."""
+    is_url = bool(args.command_or_url and args.command_or_url.startswith(("http://", "https://")))
+    frontend = args.frontend or ("stdio" if is_url else "http")
+    named = bool(args.named_server_config or args.named_server_definitions)
+    if frontend == "stdio" and args.frontend and getattr(args, "explicit_port", False):
+        raise ValueError("A stdio frontend cannot bind --port/--sse-port")
+    if args.server and (frontend != "stdio" or not args.named_server_config or args.command_or_url):
+        raise ValueError(
+            "--server requires stdio frontend and named config without a positional target"
+        )
+    if args.frontend == "stdio" and named and not args.server:
+        raise ValueError("Named stdio frontend requires --named-server-config and --server")
+    if not args.resilient and (args.server or (args.frontend and ((frontend == "http") == is_url))):
+        raise ValueError("Same-transport frontends and --server require --resilient")
+    return t.cast("t.Literal['stdio', 'http']", frontend)
+
+
+def _resilience_settings(args: argparse.Namespace) -> ResilienceSettings | None:
+    if not getattr(args, "resilient", False):
+        return None
+    return ResilienceSettings(
+        connect_timeout=args.connect_timeout,
+        retry_interval=args.retry_interval,
+        tool_cache_dir=args.tool_cache_dir,
+    )
+
+
 def _setup_argument_parser() -> argparse.ArgumentParser:
     """Set up and return the argument parser for the MCP proxy."""
     parser = argparse.ArgumentParser(
+        prog=APP_NAME,
         description=("Start the MCP proxy in one of two possible modes: as a client or a server."),
         epilog=(
             "Examples:\n"
-            "  mcp-proxy http://localhost:8080/sse\n"
-            "  mcp-proxy --no-verify-ssl https://server.local/sse\n"
-            "  mcp-proxy --transport streamablehttp http://localhost:8080/mcp\n"
-            "  mcp-proxy --transport streamablehttp --username user --password pass "
+            "  mcp-proxy-resilient http://localhost:8080/sse\n"
+            "  mcp-proxy-resilient --no-verify-ssl https://server.local/sse\n"
+            "  mcp-proxy-resilient --transport streamablehttp http://localhost:8080/mcp\n"
+            "  mcp-proxy-resilient --transport streamablehttp --username user --password pass "
             "https://server.local/mcp\n"
-            "  mcp-proxy --headers Authorization 'Bearer YOUR_TOKEN' http://localhost:8080/sse\n"
-            "  mcp-proxy --port 8080 -- your-command --arg1 value1 --arg2 value2\n"
-            "  mcp-proxy --named-server fetch 'uvx mcp-server-fetch' --port 8080\n"
-            "  mcp-proxy your-command --port 8080 -e KEY VALUE -e ANOTHER_KEY ANOTHER_VALUE\n"
-            "  mcp-proxy your-command --port 8080 --allow-origin='*'\n"
+            "  mcp-proxy-resilient --headers Authorization 'Bearer YOUR_TOKEN' http://localhost:8080/sse\n"
+            "  mcp-proxy-resilient --port 8080 -- your-command --arg1 value1 --arg2 value2\n"
+            "  mcp-proxy-resilient --named-server fetch 'uvx mcp-server-fetch' --port 8080\n"
+            "  mcp-proxy-resilient your-command --port 8080 "
+            "-e KEY VALUE -e ANOTHER_KEY ANOTHER_VALUE\n"
+            "  mcp-proxy-resilient your-command --port 8080 --allow-origin='*'\n"
+            "  mcp-proxy-resilient --resilient --port 18080 --named-server-config servers.json\n"
         ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
@@ -72,15 +127,37 @@ def _setup_argument_parser() -> argparse.ArgumentParser:
 
 def _add_arguments_to_parser(parser: argparse.ArgumentParser) -> None:
     """Add all arguments to the argument parser."""
-    try:
-        package_version = version("mcp-proxy")
-    except Exception:  # noqa: BLE001
-        package_version = "unknown"
-
+    recovery = parser.add_argument_group("Resilient catalog proxy (all transport combinations)")
+    recovery.add_argument(
+        "--frontend",
+        choices=["stdio", "http"],
+        help="Client-facing transport; omitted preserves legacy inference",
+    )
+    recovery.add_argument("--server", help="Select one named backend for the stdio frontend")
+    recovery.add_argument(
+        "--resilient", action="store_true", help="Keep proxy alive when backend fails"
+    )
+    recovery.add_argument(
+        "--connect-timeout",
+        type=_positive_seconds,
+        default=10,
+        help="Resilient mode: connection/initialization/discovery timeout in seconds (default: 10)",
+    )
+    recovery.add_argument(
+        "--retry-interval",
+        type=_positive_seconds,
+        default=5,
+        help="Resilient mode: initial retry and idle health-check interval in seconds (default: 5)",
+    )
+    recovery.add_argument(
+        "--tool-cache-dir",
+        type=Path,
+        help="Optional persistent tools/resources/prompts metadata cache",
+    )
     parser.add_argument(
         "--version",
         action="version",
-        version=f"%(prog)s {package_version}",
+        version=f"{APP_NAME} {__version__}",
         help="Show the version and exit",
     )
 
@@ -245,6 +322,7 @@ def _add_arguments_to_parser(parser: argparse.ArgumentParser) -> None:
     mcp_server_group = parser.add_argument_group("SSE server options")
     mcp_server_group.add_argument(
         "--port",
+        action=_PortAction,
         type=int,
         default=0,
         help="Port to expose an SSE server on. Default is a random port",
@@ -262,6 +340,7 @@ def _add_arguments_to_parser(parser: argparse.ArgumentParser) -> None:
     )
     mcp_server_group.add_argument(
         "--sse-port",
+        action=_PortAction,
         type=int,
         default=0,
         help="(deprecated) Same as --port",
@@ -302,12 +381,12 @@ def _setup_logging(*, level: str, debug: bool) -> logging.Logger:
     return logging.getLogger(__name__)
 
 
-def _handle_sse_client_mode(
+def _http_parameters(
     args_parsed: argparse.Namespace,
     logger: logging.Logger,
     verify_ssl: bool | str | None = None,
-) -> None:
-    """Handle SSE/StreamableHTTP client mode operation."""
+) -> HttpServerParameters:
+    """Share HTTP credentials and TLS options between both frontends."""
     if args_parsed.named_server_definitions:
         logger.warning(
             "--named-server arguments are ignored when command_or_url is an HTTP/HTTPS URL "
@@ -342,6 +421,26 @@ def _handle_sse_client_mode(
     else:
         auth = None
 
+    return HttpServerParameters(
+        args_parsed.command_or_url,
+        args_parsed.transport,
+        headers=headers,
+        auth=auth,
+        verify_ssl=verify_ssl,
+    )
+
+
+def _handle_sse_client_mode(
+    args_parsed: argparse.Namespace,
+    logger: logging.Logger,
+    verify_ssl: bool | str | None = None,
+) -> None:
+    """Handle legacy SSE/StreamableHTTP client mode operation."""
+    params = _http_parameters(args_parsed, logger, verify_ssl)
+    headers, auth = params.headers, params.auth
+    recovery_options = {}
+    if settings := _resilience_settings(args_parsed):
+        recovery_options["resilience"] = settings
     if args_parsed.transport == "streamablehttp":
         asyncio.run(
             run_streamablehttp_client(
@@ -349,6 +448,7 @@ def _handle_sse_client_mode(
                 headers=headers,
                 auth=auth,
                 verify_ssl=verify_ssl,
+                **recovery_options,
             ),
         )
     else:
@@ -358,6 +458,7 @@ def _handle_sse_client_mode(
                 headers=headers,
                 auth=auth,
                 verify_ssl=verify_ssl,
+                **recovery_options,
             ),
         )
 
@@ -383,11 +484,12 @@ def _configure_default_server(
         env=default_server_env,
         cwd=args_parsed.cwd or None,
     )
-    logger.info(
-        "Configured default server: %s %s",
-        args_parsed.command_or_url,
-        " ".join(args_parsed.args),
-    )
+    if not getattr(args_parsed, "resilient", False):
+        logger.info(
+            "Configured default server: %s %s",
+            args_parsed.command_or_url,
+            " ".join(args_parsed.args),
+        )
     return default_stdio_params
 
 
@@ -469,14 +571,27 @@ def _create_mcp_settings(args_parsed: argparse.Namespace) -> MCPServerSettings:
         allow_origins=args_parsed.allow_origin if len(args_parsed.allow_origin) > 0 else None,
         expose_headers=expose_headers,
         log_level="DEBUG" if args_parsed.debug else args_parsed.log_level,
+        resilience=_resilience_settings(args_parsed),
     )
 
 
-def main() -> None:
+def main() -> None:  # noqa: C901 - retain the legacy routing path unchanged.
     """Start the client using asyncio."""
     parser = _setup_argument_parser()
     args_parsed = parser.parse_args()
     logger = _setup_logging(level=args_parsed.log_level, debug=args_parsed.debug)
+    logger.info("%s %s (resilient mode: %s)", APP_NAME, __version__, args_parsed.resilient)
+    try:
+        frontend = _resolve_frontend(args_parsed)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    if args_parsed.resilient:
+        try:
+            _run_resilient(args_parsed, frontend, logger)
+        except ValueError as exc:
+            parser.error(str(exc))
+        return
 
     # Validate required arguments
     if (
@@ -546,6 +661,47 @@ def main() -> None:
             mcp_settings=mcp_settings,
         ),
     )
+
+
+def _run_resilient(args: argparse.Namespace, frontend: str, logger: logging.Logger) -> None:
+    """Resolve backend descriptions once, then compose either frontend with the same core."""
+    base_env = dict(os.environ) if args.pass_environment else {}
+    default: BackendParameters | None = None
+    if args.command_or_url and args.command_or_url.startswith(("http://", "https://")):
+        default = _http_parameters(args, logger, _normalize_verify_ssl(args.verify_ssl))
+    else:
+        default = _configure_default_server(args, base_env, logger)
+    named: dict[str, BackendParameters] = {}
+    if args.named_server_config:
+        named = load_resilient_server_configs(args.named_server_config, base_env)
+    elif args.named_server_definitions:
+        # Suppress command-string logging in the legacy CLI parser; arguments may be secrets.
+        quiet = logging.getLogger("resilient-config")
+        quiet.setLevel(logging.CRITICAL)
+        named.update(
+            _configure_named_servers_from_cli(args.named_server_definitions, base_env, quiet)
+        )
+    if frontend == "stdio":
+        if args.server:
+            if args.server not in named:
+                raise ValueError("Selected server is unknown or disabled")
+            selected, name = named[args.server], args.server
+        elif default is not None and not named:
+            selected, name = default, "default"
+        else:
+            raise ValueError("Stdio frontend requires exactly one selected backend")
+        settings = _resilience_settings(args)
+        if settings is None:
+            raise ValueError("This frontend requires --resilient")
+        asyncio.run(
+            run_resilient_stdio(
+                connector_for(selected), settings, cache_identity=cache_identity_for(name, selected)
+            )
+        )
+    else:
+        if default is None and not named:
+            raise ValueError("No enabled backend configured")
+        asyncio.run(run_mcp_server(_create_mcp_settings(args), default, named))
 
 
 if __name__ == "__main__":

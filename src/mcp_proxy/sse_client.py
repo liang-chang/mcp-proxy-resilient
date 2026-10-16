@@ -1,5 +1,6 @@
 """Create a local server that proxies requests to a remote server over SSE."""
 
+import json
 from functools import partial
 from typing import Any
 
@@ -10,6 +11,8 @@ from mcp.server.stdio import stdio_server
 
 from .httpx_client import custom_httpx_client
 from .proxy_server import create_proxy_server
+from .resilient import ResilienceSettings
+from .resilient_transports import http_connector, run_resilient_stdio
 
 
 async def run_sse_client(
@@ -17,6 +20,7 @@ async def run_sse_client(
     headers: dict[str, Any] | None = None,
     auth: httpx.Auth | None = None,
     verify_ssl: bool | str | None = None,
+    resilience: ResilienceSettings | None = None,
 ) -> None:
     """Run the SSE client.
 
@@ -26,7 +30,17 @@ async def run_sse_client(
         auth: Optional authentication for the HTTP client.
         verify_ssl: Control SSL verification. Use False to disable
             or a path to a certificate bundle.
+        resilience: Enable the tools-only recovery facade when provided.
     """
+    if resilience is not None:
+        await run_resilient_stdio(
+            http_connector(url, transport="sse", headers=headers, auth=auth, verify_ssl=verify_ssl),
+            resilience,
+            cache_identity=json.dumps(["sse", url, headers], sort_keys=True)
+            if auth is None
+            else None,
+        )
+        return
     async with (
         sse_client(
             url=url,

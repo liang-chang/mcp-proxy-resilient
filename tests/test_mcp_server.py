@@ -3,6 +3,7 @@
 
 import asyncio
 import contextlib
+import signal
 import sys
 import typing as t
 from unittest.mock import AsyncMock, MagicMock, create_autospec, patch
@@ -78,8 +79,11 @@ def create_starlette_app(
 class BackgroundServer(uvicorn.Server):
     """A test server that runs in a background thread."""
 
-    def install_signal_handlers(self) -> None:
-        """Do not install signal handlers."""
+    @contextlib.contextmanager
+    def capture_signals(self) -> t.Iterator[None]:
+        """Do not let fixture shutdown poison sse-starlette's process-global exit flag."""
+        # bugfix: modern Uvicorn no longer calls install_signal_handlers.
+        yield
 
     @contextlib.asynccontextmanager
     async def run_in_background(self) -> t.AsyncIterator[None]:
@@ -144,6 +148,13 @@ def make_background_server(*, debug: bool = False, stateless: bool = False) -> B
 
     config = uvicorn.Config(app, port=0, log_level="info")
     return BackgroundServer(config)
+
+
+async def test_background_server_does_not_capture_process_signals() -> None:
+    """In-process fixtures cannot own process-global SSE shutdown coordination."""
+    handler = signal.getsignal(signal.SIGTERM)
+    async with make_background_server().run_in_background():
+        assert signal.getsignal(signal.SIGTERM) is handler
 
 
 async def test_sse_transport() -> None:

@@ -3,7 +3,7 @@
 import contextlib
 import logging
 import sys
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Final, Literal
@@ -23,7 +23,10 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import BaseRoute, Mount, Route
 from starlette.types import Receive, Scope, Send
 
+from .backend import BackendParameters
 from .proxy_server import create_proxy_server
+from .resilient import ResilienceSettings, ResilientProxy
+from .resilient_transports import cache_identity_for, connector_for
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +47,7 @@ class MCPServerSettings:
     allow_origins: list[str] | None = None
     expose_headers: list[str] = field(default_factory=_default_expose_headers)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    resilience: ResilienceSettings | None = None
 
 
 # To store last activity for multiple servers if needed, though status endpoint is global for now.
@@ -218,10 +222,33 @@ class _StdioExitWatch:
             sys.exit(1)
 
 
-async def run_mcp_server(
+async def _open_proxy(
+    stack: contextlib.AsyncExitStack,
+    params: BackendParameters,
+    name: str,
+    settings: MCPServerSettings,
+    exit_watch: _StdioExitWatch,
+) -> MCPServerSDK[object]:
+    if settings.resilience is not None:
+        resilient = await stack.enter_async_context(
+            ResilientProxy(
+                connector_for(params),
+                settings.resilience,
+                cache_identity=cache_identity_for(name, params),
+            )
+        )
+        return resilient.app
+    if not isinstance(params, StdioServerParameters):
+        raise TypeError("HTTP backends on HTTP frontend require --resilient")
+    streams = await stack.enter_async_context(exit_watch.client(params, name))
+    session = await stack.enter_async_context(ClientSession(*streams))
+    return await create_proxy_server(session)
+
+
+async def run_mcp_server(  # noqa: C901, PLR0915 - legacy and recoverable hosting paths.
     mcp_settings: MCPServerSettings,
-    default_server_params: StdioServerParameters | None = None,
-    named_server_params: dict[str, StdioServerParameters] | None = None,
+    default_server_params: BackendParameters | None = None,
+    named_server_params: Mapping[str, BackendParameters] | None = None,
 ) -> None:
     """Run stdio client(s) and expose an MCP server with multiple possible backends."""
     if named_server_params is None:
@@ -243,16 +270,19 @@ async def run_mcp_server(
 
         # Setup default server if configured
         if default_server_params:
-            logger.info(
-                "Setting up default server: %s %s",
-                default_server_params.command,
-                " ".join(default_server_params.args),
+            if mcp_settings.resilience is None and isinstance(
+                default_server_params, StdioServerParameters
+            ):
+                logger.info(
+                    "Setting up default server: %s %s",
+                    default_server_params.command,
+                    " ".join(default_server_params.args),
+                )
+            else:
+                logger.info("Setting up default server")
+            proxy = await _open_proxy(
+                stack, default_server_params, "default", mcp_settings, stdio_exit
             )
-            stdio_streams = await stack.enter_async_context(
-                stdio_exit.client(default_server_params, "default"),
-            )
-            session = await stack.enter_async_context(ClientSession(*stdio_streams))
-            proxy = await create_proxy_server(session)
 
             instance_routes, http_manager = create_single_instance_routes(
                 proxy,
@@ -264,15 +294,16 @@ async def run_mcp_server(
 
         # Setup named servers
         for name, params in named_server_params.items():
-            logger.info(
-                "Setting up named server '%s': %s %s",
-                name,
-                params.command,
-                " ".join(params.args),
-            )
-            stdio_streams_named = await stack.enter_async_context(stdio_exit.client(params, name))
-            session_named = await stack.enter_async_context(ClientSession(*stdio_streams_named))
-            proxy_named = await create_proxy_server(session_named)
+            if mcp_settings.resilience is None and isinstance(params, StdioServerParameters):
+                logger.info(
+                    "Setting up named server '%s': %s %s",
+                    name,
+                    params.command,
+                    " ".join(params.args),
+                )
+            else:
+                logger.info("Setting up named server '%s'", name)
+            proxy_named = await _open_proxy(stack, params, name, mcp_settings, stdio_exit)
 
             instance_routes_named, http_manager_named = create_single_instance_routes(
                 proxy_named,
