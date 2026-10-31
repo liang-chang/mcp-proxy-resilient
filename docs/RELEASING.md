@@ -8,17 +8,17 @@
 ## 版本与发布产物
 
 程序版本的唯一来源是 `src/mcp_proxy/__init__.py`，setuptools 会动态读取。
-首个独立发布候选版本为 `0.13.0+resilient.2`，标签必须完整写为
-`v0.13.0+resilient.2`，包括加号，以保留所基于的上游版本信息。
+当前版本为 `0.13.0+resilient.3`，标签必须完整写为
+`v0.13.0+resilient.3`，包括加号，以保留所基于的上游版本信息。
 后续升级时，应同步更新源码版本、更新日志和安装示例中的文件名。
 `uv.lock` 不固定本地可编辑项目的版本；依赖或元数据变化后，仍须执行
 `uv lock`，并确认 `uv sync --locked` 成功。
 
-首个候选版本包含以下产物：
+当前版本包含以下产物：
 
-- mcp_proxy_resilient-0.13.0+resilient.2-py3-none-any.whl
-- mcp_proxy_resilient-0.13.0+resilient.2.tar.gz
-- mcp-proxy-resilient-0.13.0-r2-windows-x64.zip
+- mcp_proxy_resilient-0.13.0+resilient.3-py3-none-any.whl
+- mcp_proxy_resilient-0.13.0+resilient.3.tar.gz
+- mcp-proxy-resilient-0.13.0-r3-windows-x64.zip
 - ZIP 对应的 `.sha256` 校验文件，以及覆盖各发布产物的 `SHA256SUMS.txt`。
 
 Windows 构建脚本会在打包前重新安装本地可编辑项目，否则可能出现可执行文件显示 r2，

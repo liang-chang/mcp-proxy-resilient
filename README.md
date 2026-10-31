@@ -22,7 +22,14 @@ author attribution, and Git history are retained.
 - Optional disk persistence retains catalog metadata across proxy restarts.
 - Business requests are never automatically replayed after failure or cancellation.
 
-The current version is 0.13.0+resilient.2. Pass --resilient to enable these behaviors.
+If a request returns `request not sent` because the backend is not ready, and the
+application is already running and authorized, call `proxy_reconnect` once before
+reporting it unavailable. This bypasses retry backoff or waits for an in-progress
+connection attempt. Resubmit the unsent request only when the returned state is
+`READY`; otherwise report `state` and `last_error` rather than repeatedly reconnecting
+or requesting another login. Calls with unknown outcomes must not be automatically replayed.
+
+The current version is 0.13.0+resilient.3. Pass --resilient to enable these behaviors.
 Without it, the original two transport directions retain their legacy startup behavior.
 
 ## Install
@@ -55,7 +62,7 @@ mcp-proxy-resilient --version
 Or install the wheel attached to a release:
 
 ~~~shell
-python -m pip install ./mcp_proxy_resilient-0.13.0+resilient.2-py3-none-any.whl
+python -m pip install ./mcp_proxy_resilient-0.13.0+resilient.3-py3-none-any.whl
 ~~~
 
 The Python distribution and executable are named mcp-proxy-resilient; the import package

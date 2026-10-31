@@ -5,11 +5,11 @@
 ## 下载与目录
 
 从本项目 GitHub Releases 下载 Windows x64 ZIP 和 SHA256SUMS.txt。
-例如版本 0.13.0+resilient.2 的 ZIP 为 mcp-proxy-resilient-0.13.0-r2-windows-x64.zip。
+例如版本 0.13.0+resilient.3 的 ZIP 为 mcp-proxy-resilient-0.13.0-r3-windows-x64.zip。
 使用 Get-FileHash 核对摘要后完整解压：
 
 ~~~powershell
-Get-FileHash ./mcp-proxy-resilient-0.13.0-r2-windows-x64.zip -Algorithm SHA256
+Get-FileHash ./mcp-proxy-resilient-0.13.0-r3-windows-x64.zip -Algorithm SHA256
 ~~~
 
 建议程序与配置目录分开，以下路径仅为示例：

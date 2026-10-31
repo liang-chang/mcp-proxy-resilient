@@ -119,8 +119,16 @@ class ResilientProxy:
             APP_NAME,
             version=__version__,
             instructions=(
-                "Recoverable tools proxy. Use proxy_status to inspect availability and "
-                "proxy_reconnect after starting or authorizing the downstream application."
+                "Recoverable tools proxy. Use proxy_status to inspect availability and last_error. "
+                "If the downstream is not READY but the application is already running and "
+                "authorization is complete, call proxy_reconnect once before reporting "
+                "it unavailable. "
+                "This bypasses retry backoff or waits for an in-progress connection attempt. "
+                "Check the returned state: only READY confirms the connection is ready. "
+                "After READY, resubmit the original request only if it was explicitly not sent; "
+                "do not automatically replay failed or interrupted calls with unknown outcomes. "
+                "If reconnect still fails, report state and last_error instead of repeatedly "
+                "reconnecting or requesting another login."
             ),
         )
         self._cache = (
@@ -219,13 +227,19 @@ class ResilientProxy:
         admin = [
             types.Tool(
                 name="proxy_status",
-                description="Inspect downstream connection and last error.",
+                description="Inspect downstream state and last error without reconnecting.",
                 inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
                 annotations=types.ToolAnnotations(readOnlyHint=True),
             ),
             types.Tool(
                 name="proxy_reconnect",
-                description="Reconnect after starting/authorizing the downstream application.",
+                description=(
+                    "If the downstream is not READY but the application is already running and "
+                    "authorized, call once to bypass retry backoff or await an in-progress "
+                    "connection. "
+                    "Check the returned state for READY before resubmitting a request that was "
+                    "explicitly not sent. If still unavailable, report state and last_error."
+                ),
                 inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
                 annotations=types.ToolAnnotations(destructiveHint=False),
             ),
@@ -249,8 +263,10 @@ class ResilientProxy:
         if self.state != "READY":
             return types.ServerResult(
                 _error(
-                    f"Downstream {self.state}; request not sent. Start/authorize the app, "
-                    "then call proxy_reconnect.",
+                    f"Downstream {self.state}; request not sent. If the app is already running and "
+                    "authorized, call proxy_reconnect once to check readiness; "
+                    "otherwise start/authorize it first. Resubmit this unsent request only "
+                    "after READY. If reconnect still fails, report state and last_error.",
                 )
             )
         if name not in {t.name for t in self.tools}:

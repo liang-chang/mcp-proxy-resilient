@@ -17,7 +17,12 @@
 - proxy_status 查看状态，proxy_reconnect 在启动应用或完成授权后重新连接。
 - 可选目录元数据缓存；失败或取消的业务请求不自动重放。
 
-当前版本 0.13.0+resilient.2。需要显式传入 --resilient；未启用时保留原版两种传输方向的启动行为。
+如果请求因下游未就绪返回 `request not sent`，且应用已经启动并完成授权，应先调用一次
+`proxy_reconnect`，再判断是否不可用。该调用会跳过退避等待，或等待正在进行的连接尝试。
+仅当返回状态为 `READY` 时，重新提交这次明确未发送的请求；否则报告 `state` 和 `last_error`，
+不要反复重连或要求再次登录。执行结果未知的请求不得自动重放。
+
+当前版本 0.13.0+resilient.3。需要显式传入 --resilient；未启用时保留原版两种传输方向的启动行为。
 
 ## 安装
 
@@ -46,7 +51,7 @@ mcp-proxy-resilient --version
 也可安装 Release 附带的 wheel：
 
 ~~~shell
-python -m pip install ./mcp_proxy_resilient-0.13.0+resilient.2-py3-none-any.whl
+python -m pip install ./mcp_proxy_resilient-0.13.0+resilient.3-py3-none-any.whl
 ~~~
 
 发行包和命令名都是 mcp-proxy-resilient，内部导入名仍为 mcp_proxy。建议与上游发行包使用独立环境。
